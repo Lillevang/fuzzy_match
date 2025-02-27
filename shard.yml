@@ -1,0 +1,9 @@
+name: fuzzy_match
+version: 0.1.0
+
+authors:
+  - Lillevang <jeppe.lillevang@gmail.com>
+
+crystal: '>= 1.15.1'
+
+license: MIT
