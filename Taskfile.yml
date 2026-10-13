@@ -1,0 +1,185 @@
+# https://taskfile.dev
+#
+# CI/CD for fuzzy_match lives in this file. Every check and publish step is a
+# `task` command that runs the same way on a laptop as on a GitHub runner;
+# the workflows in .github/ are thin wrappers that call these tasks. If
+# Actions is ever unavailable, `task publish` cuts the same release from here.
+#
+#   task                 same as `task verify`
+#   task verify          format check + specs + example smoke test + API docs
+#   task bump            bump the patch version (TARGET=minor|major for the others)
+#   task release         verify, tag vX.Y.Z and push it — the workflow does the rest
+#   task publish         create the GitHub release for the current tag by hand
+
+version: '3'
+
+# Applies to every command block: a failure anywhere aborts the task, rather
+# than Task reporting the exit code of the block's last line.
+set: [errexit, nounset, pipefail]
+
+vars:
+  NAME: fuzzy_match
+  VERSION_FILE: src/fuzzy_match.cr
+  # src/fuzzy_match.cr is the single source of truth; shard.yml mirrors it
+  # and `preflight` refuses to release while the two disagree.
+  VERSION:
+    sh: grep -Eo 'VERSION[[:space:]]*=[[:space:]]*"[^"]+"' src/fuzzy_match.cr | sed -E 's/.*"([^"]+)".*/\1/'
+  TAG: 'v{{.VERSION}}'
+  DOCS: docs
+
+tasks:
+
+  default:
+    cmds:
+      - task: verify
+
+  fmt:
+    desc: Format all Crystal sources in place
+    cmds:
+      - crystal tool format
+
+  lint:
+    desc: Fail if any source is not formatted
+    cmds:
+      - crystal tool format --check
+
+  test:
+    desc: Run the spec suite
+    cmds:
+      - crystal spec
+
+  smoke:
+    desc: Run the example against the library and check it picks the obvious matches
+    silent: true
+    cmds:
+      - |
+        # The example exercises every scorer plus extract_one through the
+        # public API, so it doubles as an end-to-end check of a fresh checkout.
+        OUT=$(crystal run examples/demo.cr 2>&1)
+        echo "$OUT" | grep -q '^fuzzy_match {{.VERSION}}$' || { echo "❌ smoke test: example did not report version {{.VERSION}}"; echo "$OUT"; exit 1; }
+        for EXPECTED in '"Lillevang Consult ApS"' '"Novo Nordisk A/S"' '"LEGO System A/S"' '"Carlsberg Breweries A/S"'; do
+          echo "$OUT" | grep -q "→ $EXPECTED" || { echo "❌ smoke test: expected a best match of $EXPECTED"; echo "$OUT"; exit 1; }
+        done
+        echo "✅ Smoke test passed ({{.NAME}} {{.VERSION}})"
+
+  docs:
+    desc: Generate the API docs into docs/
+    cmds:
+      - crystal docs --project-name={{.NAME}} --project-version={{.VERSION}} --source-refname={{.TAG}}
+
+  verify:
+    desc: Format check, specs, smoke test and docs build — the local CI run
+    cmds:
+      - task: lint
+      - task: test
+      - task: smoke
+      - task: docs
+
+  bump:
+    silent: true
+    desc: Bump version in src/fuzzy_match.cr and shard.yml (TARGET=patch|minor|major)
+    vars:
+      TARGET: '{{.TARGET | default "patch"}}'
+    cmds:
+      - |
+        CURRENT="{{.VERSION}}"
+        # Validate before computing: a malformed version would otherwise be
+        # coerced by the arithmetic into a plausible-looking wrong one.
+        echo "$CURRENT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+          echo "❌ malformed version in {{.VERSION_FILE}}: '$CURRENT' (want MAJOR.MINOR.PATCH)"
+          exit 1
+        }
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+        case "{{.TARGET}}" in
+          patch) PATCH=$((PATCH+1));;
+          minor) MINOR=$((MINOR+1)); PATCH=0;;
+          major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0;;
+          *) echo "❌ unknown bump target: {{.TARGET}}"; exit 1;;
+        esac
+        NEW="$MAJOR.$MINOR.$PATCH"
+        sed -i.bak -E "s/VERSION[[:space:]]*=[[:space:]]*\"[^\"]*\"/VERSION = \"$NEW\"/" {{.VERSION_FILE}} && rm -f {{.VERSION_FILE}}.bak
+        sed -i.bak -E "s/^version:.*/version: $NEW/" shard.yml && rm -f shard.yml.bak
+        echo "🔼 Bumped version: $CURRENT → $NEW"
+        echo "   Commit it, then run 'task release'."
+
+  preflight:
+    silent: true
+    internal: true
+    cmds:
+      - |
+        SHARD_VERSION=$(grep -E '^version:' shard.yml | sed -E 's/^version:[[:space:]]*//')
+        if [ "$SHARD_VERSION" != "{{.VERSION}}" ]; then
+          echo "❌ shard.yml says $SHARD_VERSION but {{.VERSION_FILE}} says {{.VERSION}} — run 'task bump' or fix by hand"
+          exit 1
+        fi
+        BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        if [ "$BRANCH" != "main" ]; then
+          echo "❌ releases are cut from main, not '$BRANCH'"
+          exit 1
+        fi
+        # The tag must point at exactly what is being released.
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "❌ working tree is not clean — commit or stash first"
+          git status --short
+          exit 1
+        fi
+        if git rev-parse -q --verify "refs/tags/{{.TAG}}" > /dev/null; then
+          echo "❌ tag {{.TAG}} already exists locally — bump the version first"
+          exit 1
+        fi
+        if git ls-remote --exit-code --tags origin "refs/tags/{{.TAG}}" > /dev/null 2>&1; then
+          echo "❌ tag {{.TAG}} already exists on origin — bump the version first"
+          exit 1
+        fi
+
+  release:
+    desc: Verify, tag vX.Y.Z and push — the release workflow publishes the GitHub release
+    silent: true
+    cmds:
+      - task: preflight
+      - task: verify
+      - |
+        echo "🏷  Tagging {{.TAG}}"
+        git tag -a "{{.TAG}}" -m "Release {{.TAG}}"
+        git push origin main
+        git push origin "{{.TAG}}"
+        echo ""
+        echo "✅ Pushed {{.TAG}}. The release workflow is now creating the GitHub release:"
+        echo "   $(gh repo view --json url -q .url 2>/dev/null || echo https://github.com/Lillevang/fuzzy_match)/actions"
+        echo "   Fallback if it fails: task publish"
+
+  check-tag:
+    desc: Fail unless HEAD carries the tag that matches src/fuzzy_match.cr
+    silent: true
+    cmds:
+      - |
+        # Guards the workflow against a tag pushed without bumping the version
+        # and `publish` against releasing the wrong commit.
+        if ! git tag --points-at HEAD | grep -qx "{{.TAG}}"; then
+          echo "❌ HEAD is not tagged {{.TAG}} ({{.VERSION_FILE}} says {{.VERSION}})"
+          echo "   tags at HEAD: $(git tag --points-at HEAD | tr '\n' ' ')"
+          echo "   run 'task release' to tag, or fix the version first"
+          exit 1
+        fi
+
+  publish:
+    desc: Create the GitHub release for the current tag (a shard ships as source, so no assets)
+    silent: true
+    cmds:
+      - task: check-tag
+      - |
+        gh auth status > /dev/null 2>&1 || { echo "❌ gh is not logged in — run 'gh auth login' (or set GH_TOKEN)"; exit 1; }
+        # `--clobber`-style idempotence: a re-run of the workflow must not fail
+        # on a release that already exists.
+        if gh release view "{{.TAG}}" > /dev/null 2>&1; then
+          echo "📦 Release {{.TAG}} already exists — nothing to do"
+        else
+          echo "📦 Creating release {{.TAG}}"
+          gh release create "{{.TAG}}" --title "{{.TAG}}" --generate-notes
+        fi
+        echo "✅ $(gh release view "{{.TAG}}" --json url -q .url)"
+
+  clean:
+    desc: Remove build outputs
+    cmds:
+      - rm -rf bin {{.DOCS}} lib .crystal

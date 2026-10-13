@@ -1,8 +1,12 @@
 name: fuzzy_match
 version: 0.1.0
 
+description: Fuzzy string matching for Crystal, with the scorers of fuzzywuzzy and rapidfuzz
+repository: https://github.com/Lillevang/fuzzy_match
+documentation: https://lillevang.github.io/fuzzy_match/
+
 authors:
-  - Lillevang <jeppe.lillevang@gmail.com>
+  - Jeppe Lillevang Salling <jeppe.lillevang@gmail.com>
 
 crystal: '>= 1.15.1'
 
