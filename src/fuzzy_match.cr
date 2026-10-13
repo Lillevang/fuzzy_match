@@ -21,5 +21,5 @@ require "./fuzzy_match/extract"
 # See `FuzzyMatch.ratio`, `FuzzyMatch.partial_ratio`, `FuzzyMatch.token_sort_ratio`,
 # `FuzzyMatch.token_set_ratio`, `FuzzyMatch.weighted_ratio` and `FuzzyMatch.extract`.
 module FuzzyMatch
-  VERSION = "0.1.0"
+  VERSION = "0.1.1"
 end
